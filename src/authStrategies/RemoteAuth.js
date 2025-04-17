@@ -23,9 +23,12 @@ const BaseAuthStrategy = require('./BaseAuthStrategy');
  * @param {string} options.dataPath - Change the default path for saving session files, default is: "./.wwebjs_auth/" 
  * @param {number} options.backupSyncIntervalMs - Sets the time interval for periodic session backups. Accepts values starting from 60000ms {1 minute}
  * @param {number} options.rmMaxRetries - Sets the maximum number of retries for removing the session directory
+ * @param {boolean} options.saveBackup - If true, it will save a copy of the session in remote store as "RemoteAuth-{clientId}-backup" session. This is useful for restoring the session in case of a failure or corruption of the main session. Default is false.
+ * @param {boolean} options.saveBackupSync - If true, it will sync the backup session with the main session. This is useful for keeping the backup session up to date with the main session. Default is false.
+ * @param {boolean} options.mustDeleteMetadata - If true, it will delete all metadata files from the session directory. This is useful for reducing the size of the session files. Default is true.
  */
 class RemoteAuth extends BaseAuthStrategy {
-    constructor({ clientId, dataPath, store, backupSyncIntervalMs, rmMaxRetries } = {}) {
+    constructor({ clientId, dataPath, store, backupSyncIntervalMs, rmMaxRetries, saveBackup, saveBackupSync, mustDeleteMetadata } = {}) {
         if (!fs && !unzipper && !archiver) throw new Error('Optional Dependencies [fs-extra, unzipper, archiver] are required to use RemoteAuth. Make sure to run npm install correctly and remove the --no-optional flag');
         super();
 
@@ -45,6 +48,9 @@ class RemoteAuth extends BaseAuthStrategy {
         this.tempDir = `${this.dataPath}/wwebjs_temp_session_${this.clientId}`;
         this.requiredDirs = ['Default', 'IndexedDB', 'Local Storage']; /* => Required Files & Dirs in WWebJS to restore session */
         this.rmMaxRetries = rmMaxRetries ?? 4;
+        this.saveBackup = saveBackup ?? false;
+        this.saveBackupSync = saveBackupSync ?? false;
+        this.mustDeleteMetadata = mustDeleteMetadata ?? true; /* => Metadata files are not required to restore session */
     }
 
     async beforeBrowserInitialized() {
@@ -58,6 +64,7 @@ class RemoteAuth extends BaseAuthStrategy {
 
         this.userDataDir = dirPath;
         this.sessionName = sessionDirName;
+        this.sessionBackupName = `${sessionDirName}-backup`;
 
         await this.extractRemoteSession();
 
@@ -91,13 +98,19 @@ class RemoteAuth extends BaseAuthStrategy {
 
     async afterAuthReady() {
         const sessionExists = await this.store.sessionExists({session: this.sessionName});
+        const sessionBackupExists = await this.store.sessionExists({session: this.sessionBackupName});
         if(!sessionExists) {
             await this.delay(60000); /* Initial delay sync required for session to be stable enough to recover */
-            await this.storeRemoteSession({emit: true});
+            await this.storeRemoteSession({
+                backup: this.saveBackup && !sessionBackupExists,
+                emit: true
+            });
         }
         var self = this;
         this.backupSync = setInterval(async function () {
-            await self.storeRemoteSession();
+            const sessionBackupExists = await self.store.sessionExists({ session: self.sessionBackupName });
+            const shouldSyncBackup = self.saveBackupSync || !sessionBackupExists;
+            await self.storeRemoteSession({backup: !shouldSyncBackup});
         }, this.backupSyncIntervalMs);
     }
 
@@ -107,6 +120,7 @@ class RemoteAuth extends BaseAuthStrategy {
         if (pathExists) {
             await this.compressSession();
             await this.store.save({session: this.sessionName});
+            if (options && options.backup) await this.store.save({session: this.sessionBackupName});
             await fs.promises.unlink(`${this.sessionName}.zip`);
             await fs.promises.rm(`${this.tempDir}`, {
                 recursive: true,
@@ -146,7 +160,7 @@ class RemoteAuth extends BaseAuthStrategy {
         const stream = fs.createWriteStream(`${this.sessionName}.zip`);
 
         await fs.copy(this.userDataDir, this.tempDir).catch(() => {});
-        // await this.deleteMetadata();
+        if (this.mustDeleteMetadata) await this.deleteMetadata();
         return new Promise((resolve, reject) => {
             archive
                 .directory(this.tempDir, false)
