@@ -554,7 +554,10 @@ declare namespace WAWebJS {
             clientId?: string,
             dataPath?: string,
             backupSyncIntervalMs: number,
-            rmMaxRetries?: number
+            rmMaxRetries?: number,
+            saveBackup?: boolean,
+            saveBackupSync?: boolean
+            mustDeleteMetadata?: boolean
         })
     }
 
