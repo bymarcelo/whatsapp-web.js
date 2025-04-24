@@ -51,6 +51,16 @@ class RemoteAuth extends BaseAuthStrategy {
         this.saveBackup = saveBackup ?? false;
         this.saveBackupSync = saveBackupSync ?? false;
         this.mustDeleteMetadata = mustDeleteMetadata ?? true; /* => Metadata files are not required to restore session */
+
+        // Debugging
+        console.table({
+            clientId: this.clientId,
+            backupSyncIntervalMs: this.backupSyncIntervalMs,
+            rmMaxRetries: this.rmMaxRetries,
+            saveBackup: this.saveBackup,
+            saveBackupSync: this.saveBackupSync,
+            mustDeleteMetadata: this.mustDeleteMetadata,
+        });
     }
 
     async beforeBrowserInitialized() {
@@ -65,6 +75,13 @@ class RemoteAuth extends BaseAuthStrategy {
         this.userDataDir = dirPath;
         this.sessionName = sessionDirName;
         this.sessionBackupName = `${sessionDirName}-backup`;
+
+        // Debugging
+        console.table({
+            sessionName: this.sessionName,
+            sessionBackupName: this.sessionBackupName,
+            userDataDir: this.userDataDir,
+        });
 
         await this.extractRemoteSession();
 
@@ -100,17 +117,27 @@ class RemoteAuth extends BaseAuthStrategy {
         const sessionExists = await this.store.sessionExists({session: this.sessionName});
         const sessionBackupExists = await this.store.sessionExists({session: this.sessionBackupName});
         if(!sessionExists) {
+            console.log(`No session found for ${this.sessionName}. Creating a new session...`);
             await this.delay(60000); /* Initial delay sync required for session to be stable enough to recover */
             await this.storeRemoteSession({
                 backup: this.saveBackup && !sessionBackupExists,
                 emit: true
             });
         }
+        console.log(`Session found for ${this.sessionName}. Syncing in ${this.backupSyncIntervalMs / 1000} seconds...`);
         var self = this;
         this.backupSync = setInterval(async function () {
+            // // If the client is not ready, skip the sync
+            // const state = await self.client?.getState().catch(() => "Unknown");
+            // if (state !== 'CONNECTED') {
+            //     console.log(`Client is not connected. Skipping sync for ${self.sessionName}...`);
+            //     return;
+            // }
+            console.log(`Sync session started for ${self.sessionName}...`);
             const sessionBackupExists = await self.store.sessionExists({ session: self.sessionBackupName });
             const shouldSyncBackup = self.saveBackupSync || !sessionBackupExists;
             await self.storeRemoteSession({backup: !shouldSyncBackup});
+            console.log(`Sync session completed for ${self.sessionName}.`);
         }, this.backupSyncIntervalMs);
     }
 
@@ -120,7 +147,14 @@ class RemoteAuth extends BaseAuthStrategy {
         if (pathExists) {
             await this.compressSession();
             await this.store.save({session: this.sessionName});
-            if (options && options.backup) await this.store.save({session: this.sessionBackupName});
+            if (options?.backup) {
+                const mainZip = `${this.sessionName}.zip`;
+                const backupZip = `${this.sessionBackupName}.zip`;
+                // Copy the main zip to a backup zip
+                await fs.copy(mainZip, backupZip);
+                await this.store.save({ session: this.sessionBackupName });
+                await fs.promises.unlink(backupZip);
+            }
             await fs.promises.unlink(`${this.sessionName}.zip`);
             await fs.promises.rm(`${this.tempDir}`, {
                 recursive: true,
